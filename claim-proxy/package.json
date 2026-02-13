@@ -1,0 +1,13 @@
+{
+  "name": "claim-proxy",
+  "version": "1.0.0",
+  "description": "Claim Polymarket via Relayer PROXY (Magic/email account)",
+  "type": "module",
+  "private": true,
+  "dependencies": {
+    "@polymarket/builder-relayer-client": "^0.0.8",
+    "@polymarket/builder-signing-sdk": "^0.0.8",
+    "dotenv": "^16.0.0",
+    "viem": "^2.0.0"
+  }
+}

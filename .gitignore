@@ -1,0 +1,28 @@
+# Ambiente e segreti (NON committare mai)
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+env/
+
+# Node (claim-proxy)
+claim-proxy/node_modules/
+claim-proxy/npm-debug.log*
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+*.swp
+*.swo
+
+# Log
+*.log
