@@ -65,7 +65,8 @@ def run_one_cycle(ex, poly_safe: str, proxy_url: str, try_relayer: bool, try_clo
     balance = ex.get_balance()
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Cash: {balance:.2f} USDC")
 
-    positions = fetch_redeemable_positions(poly_safe, proxy_url=proxy_url or None)
+    # Per i claim NON serve proxy: Relayer e Data API sono accessibili direttamente
+    positions = fetch_redeemable_positions(poly_safe, proxy_url=None)
     if not positions:
         print("  Claim disponibili: 0")
         return 0
@@ -104,7 +105,8 @@ def run_one_cycle(ex, poly_safe: str, proxy_url: str, try_relayer: bool, try_clo
             if os.path.isfile(node_script):
                 print("  Tentativo claim via Relayer PROXY (Node)...")
                 try:
-                    # Node va al relayer/RPC senza proxy (evita "plain HTTP sent to HTTPS port")
+                    # Node va al relayer/RPC SENZA proxy: Relayer e RPC sono accessibili direttamente
+                    # Il proxy serve solo per CLOB API (balance/trading), non per claim
                     node_env = {k: v for k, v in os.environ.items() if k not in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")}
                     r = subprocess.run(
                         ["node", node_script] + condition_ids,

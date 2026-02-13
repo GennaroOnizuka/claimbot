@@ -40,22 +40,21 @@ REDEEM_POSITIONS_ABI = [
 
 def fetch_redeemable_positions(
     user_address: str,
-    proxy_url: Optional[str] = None,
+    proxy_url: Optional[str] = None,  # Non usato: Data API accessibile direttamente
     limit: int = 100,
 ) -> List[Dict[str, Any]]:
     """
     Recupera le posizioni claimabili (redeemable) per un indirizzo.
     Data API: GET /positions?user=<addr>&redeemable=true
+    NOTA: proxy_url ignorato - Data API accessibile direttamente senza proxy.
     """
     import httpx
 
     url = f"{DATA_API_BASE}{POSITIONS_PATH}"
     params = {"user": user_address, "redeemable": "true", "limit": limit}
-    kwargs = {"params": params, "timeout": 30.0}
-    if proxy_url:
-        kwargs["proxy"] = proxy_url
-
-    with httpx.Client(http2=True, **({"proxy": proxy_url} if proxy_url else {})) as client:
+    
+    # Nessun proxy: Data API accessibile direttamente
+    with httpx.Client(http2=True, timeout=30.0) as client:
         resp = client.get(url, params=params, timeout=30.0)
         resp.raise_for_status()
         data = resp.json()
@@ -101,7 +100,7 @@ def execute_redeem_via_relayer(
     builder_passphrase: str,
     relayer_url: str = "https://relayer-v2.polymarket.com/",
     chain_id: int = 137,
-    proxy_url: Optional[str] = None,
+    proxy_url: Optional[str] = None,  # Non usato: Relayer accessibile direttamente
 ) -> List[Dict[str, Any]]:
     """
     Esegue le transazioni di redeem tramite Polymarket Relayer (gasless).
