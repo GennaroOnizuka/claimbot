@@ -80,6 +80,8 @@ async function main() {
   }
 
   let ok = 0;
+  let rateLimitHit = false;
+  let rateLimitResetSeconds = 0;
   for (const cid of conditionIds) {
     try {
       const tx = createRedeemTx(cid);
@@ -92,8 +94,22 @@ async function main() {
         console.error("Claim fallito:", cid.slice(0, 18) + "...");
       }
     } catch (e) {
-      console.error("Claim errore", cid.slice(0, 18) + "...", e.message || e);
+      const errMsg = e.message || String(e);
+      // Rate limit 429: quota exceeded
+      if (errMsg.includes("429") || errMsg.includes("quota exceeded") || errMsg.includes("Too Many Requests")) {
+        rateLimitHit = true;
+        const resetMatch = errMsg.match(/resets in (\d+) seconds/);
+        if (resetMatch) {
+          rateLimitResetSeconds = parseInt(resetMatch[1], 10);
+        }
+        console.error("RATE_LIMIT_429:", rateLimitResetSeconds || "unknown");
+        break; // Non provare altri claim se quota esaurita
+      }
+      console.error("Claim errore", cid.slice(0, 18) + "...", errMsg);
     }
+  }
+  if (rateLimitHit) {
+    console.log("RATE_LIMIT_RESET_SECONDS:", rateLimitResetSeconds);
   }
   console.log("Fatto:", ok, "/", conditionIds.length);
   process.exit(ok === conditionIds.length ? 0 : 1);

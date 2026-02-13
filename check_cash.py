@@ -50,8 +50,10 @@ def _setup_proxy() -> None:
     _h._http_client = httpx.Client(http2=True, proxy=proxy_url, timeout=30.0)
 
 
-def run_one_cycle(ex, poly_safe: str, proxy_url: str, try_relayer: bool, try_clob_sell: bool, signature_type: int = 0) -> None:
-    """Un singolo ciclo: balance, fetch claim, esegui claim (relayer o CLOB)."""
+def run_one_cycle(ex, poly_safe: str, proxy_url: str, try_relayer: bool, try_clob_sell: bool, signature_type: int = 0) -> int:
+    """Un singolo ciclo: balance, fetch claim, esegui claim (relayer o CLOB).
+    Returns: seconds to wait before next cycle (0 = use default LOOP_WAIT_SECONDS).
+    """
     from claims import (
         fetch_redeemable_positions,
         get_unique_condition_ids,
@@ -66,7 +68,7 @@ def run_one_cycle(ex, poly_safe: str, proxy_url: str, try_relayer: bool, try_clo
     positions = fetch_redeemable_positions(poly_safe, proxy_url=proxy_url or None)
     if not positions:
         print("  Claim disponibili: 0")
-        return
+        return 0
 
     condition_ids = get_unique_condition_ids(positions)
     print(f"  Claim disponibili: {len(condition_ids)} mercato/i — {len(positions)} posizioni")
@@ -76,6 +78,12 @@ def run_one_cycle(ex, poly_safe: str, proxy_url: str, try_relayer: bool, try_clo
         print(f"    • {title}: {size:.2f} share")
     if len(positions) > 15:
         print(f"    ... e altre {len(positions) - 15}")
+    
+    # Limita claim per ciclo per evitare rate limit (max 10 per ciclo)
+    MAX_CLAIMS_PER_CYCLE = int(os.getenv("MAX_CLAIMS_PER_CYCLE", "10"))
+    if len(condition_ids) > MAX_CLAIMS_PER_CYCLE:
+        print(f"  ⚠️  Limite claim per ciclo: {MAX_CLAIMS_PER_CYCLE} (ci sono {len(condition_ids)} mercati)")
+        condition_ids = condition_ids[:MAX_CLAIMS_PER_CYCLE]
 
     # 1) Tenta claim via Relayer (richiede Builder API + Safe wallet)
     claimed_relayer = 0
@@ -113,19 +121,31 @@ def run_one_cycle(ex, poly_safe: str, proxy_url: str, try_relayer: bool, try_clo
                                 if line.strip():
                                     print(f"  {line}")
                     else:
-                        if r.stderr:
-                            print(f"  Node PROXY: {r.stderr.strip()[:200]}")
-                        # fallback al relayer Python (fallirà per Magic)
-                        txs = [build_redeem_tx(cid) for cid in condition_ids]
-                        results = execute_redeem_via_relayer(txs, pk, builder_key, builder_secret, builder_pp)
-                        errors = [x.get("error") for x in results if isinstance(x, dict) and x.get("error")]
-                        if errors:
-                            msg = errors[0][:90]
-                            if len(errors) > 1 and all(e[:50] == errors[0][:50] for e in errors):
-                                print(f"  Relayer: {msg} ({len(errors)} mercati)")
+                        # Controlla se è rate limit 429
+                        output = (r.stderr or "") + (r.stdout or "")
+                        if "429" in output or "quota exceeded" in output.lower() or "RATE_LIMIT_429" in output:
+                            reset_match = None
+                            for line in output.split("\n"):
+                                if "RATE_LIMIT_RESET_SECONDS:" in line:
+                                    try:
+                                        reset_sec = int(line.split(":")[-1].strip())
+                                        reset_match = reset_sec
+                                    except:
+                                        pass
+                            if reset_match and reset_match > 0:
+                                reset_hours = reset_match // 3600
+                                reset_mins = (reset_match % 3600) // 60
+                                print(f"  ⚠️  Rate limit Relayer: quota esaurita. Reset tra ~{reset_hours}h {reset_mins}m")
+                                # Ritorna un wait esteso (minimo 1 ora, max reset time)
+                                extended_wait = min(max(3600, reset_match // 2), reset_match)
+                                return extended_wait
                             else:
-                                for e in errors:
-                                    print(f"  Relayer: {e[:90]}")
+                                print(f"  ⚠️  Rate limit Relayer: quota esaurita. Aspetta ~8 ore prima di riprovare.")
+                                return 3600 * 2  # Aspetta 2 ore se non sappiamo il reset time
+                        else:
+                            if r.stderr:
+                                print(f"  Node PROXY: {r.stderr.strip()[:200]}")
+                            # Non fare fallback Python per Magic (modulo non installato su Replit/Render)
                 except FileNotFoundError:
                     print("  Node non trovato. Installa Node.js e in claim-proxy/ esegui: npm install")
                 except subprocess.TimeoutExpired:
@@ -166,6 +186,8 @@ def run_one_cycle(ex, poly_safe: str, proxy_url: str, try_relayer: bool, try_clo
     # Se ci sono ancora claim non eseguiti, avvisa
     if positions and claimed_relayer == 0 and not (try_clob_sell and ok_count > 0):
         print("  → Fai claim manuale su polymarket.com → Portfolio → clicca Claim sui mercati risolti.")
+    
+    return 0  # Usa il wait time di default
 
 
 def main():
@@ -226,17 +248,26 @@ def main():
 
     while True:
         try:
-            run_one_cycle(ex, poly_safe, proxy_url, try_relayer, try_clob_sell, signature_type)
+            wait_seconds = run_one_cycle(ex, poly_safe, proxy_url, try_relayer, try_clob_sell, signature_type)
+            if wait_seconds <= 0:
+                wait_seconds = LOOP_WAIT_SECONDS
         except KeyboardInterrupt:
             print("\nInterrotto.")
             break
         except Exception as e:
             print(f"  Errore ciclo: {e}")
+            wait_seconds = LOOP_WAIT_SECONDS
         if RUN_ONCE:
             print("  RUN_ONCE=1: un solo ciclo, exit.")
             break
-        print(f"  Prossimo controllo tra {LOOP_WAIT_SECONDS // 60} minuti...")
-        time.sleep(LOOP_WAIT_SECONDS)
+        wait_mins = wait_seconds // 60
+        if wait_mins >= 60:
+            wait_hours = wait_mins // 60
+            wait_mins_remainder = wait_mins % 60
+            print(f"  Prossimo controllo tra {wait_hours}h {wait_mins_remainder}m...")
+        else:
+            print(f"  Prossimo controllo tra {wait_mins} minuti...")
+        time.sleep(wait_seconds)
 
 
 if __name__ == "__main__":
