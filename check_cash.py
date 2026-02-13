@@ -15,6 +15,10 @@ from datetime import datetime
 from dotenv import load_dotenv
 load_dotenv()
 
+# Force unbuffered output per Render/Replit (vedi log immediatamente)
+sys.stdout.reconfigure(line_buffering=True) if hasattr(sys.stdout, 'reconfigure') else None
+sys.stderr.reconfigure(line_buffering=True) if hasattr(sys.stderr, 'reconfigure') else None
+
 # Secondi tra un giro e l'altro (default 10 minuti)
 LOOP_WAIT_SECONDS = int(os.getenv("CLAIM_LOOP_WAIT_SECONDS", "600"))
 # Se 1/true: esegue un solo ciclo e esce (per test)
@@ -63,12 +67,12 @@ def run_one_cycle(ex, poly_safe: str, proxy_url: str, try_relayer: bool, try_clo
     )
 
     balance = ex.get_balance()
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] Cash: {balance:.2f} USDC")
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Cash: {balance:.2f} USDC", flush=True)
 
     # Per i claim NON serve proxy: Relayer e Data API sono accessibili direttamente
     positions = fetch_redeemable_positions(poly_safe, proxy_url=None)
     if not positions:
-        print("  Claim disponibili: 0")
+        print("  Claim disponibili: 0", flush=True)
         return 0
 
     condition_ids = get_unique_condition_ids(positions)
@@ -201,11 +205,15 @@ def run_one_cycle(ex, poly_safe: str, proxy_url: str, try_relayer: bool, try_clo
 
 
 def main():
+    print("🚀 Avvio CLAIMBOT...", flush=True)
+    
     if not os.getenv("PRIVATE_KEY"):
         print("ERRORE: PRIVATE_KEY mancante in .env", file=sys.stderr)
         sys.exit(1)
-
+    
+    print("✓ PRIVATE_KEY trovato", flush=True)
     _setup_proxy()
+    print("✓ Proxy configurato (solo per CLOB)", flush=True)
 
     api_key = os.getenv("POLYMARKET_API_KEY", "").strip()
     api_secret = os.getenv("POLYMARKET_API_SECRET", "").strip()
@@ -218,6 +226,7 @@ def main():
     signature_type = int(os.getenv("SIGNATURE_TYPE", "0"))
 
     try:
+        print("✓ Caricamento OrderExecutor...", flush=True)
         from executor import OrderExecutor
         ex = OrderExecutor(
             api_key=api_key or "",
@@ -226,12 +235,17 @@ def main():
             private_key=private_key,
             signature_type=signature_type,
         )
+        print("✓ OrderExecutor creato, test connessione...", flush=True)
         # warm-up
-        ex.get_balance()
+        balance = ex.get_balance()
+        print(f"✓ Connessione OK! Balance iniziale: {balance:.2f} USDC", flush=True)
     except Exception as e:
-        print(f"Errore init: {e}", file=sys.stderr)
+        import traceback
+        print(f"❌ Errore init: {e}", file=sys.stderr, flush=True)
+        print(f"Traceback: {traceback.format_exc()}", file=sys.stderr, flush=True)
         sys.exit(1)
 
+    print("✓ Ricerca indirizzo wallet...", flush=True)
     poly_safe = (os.getenv("POLY_SAFE_ADDRESS") or os.getenv("SAFE_ADDRESS") or "").strip()
     if not poly_safe:
         try:
@@ -241,42 +255,56 @@ def main():
                 pk = "0x" + pk
             if pk:
                 poly_safe = Web3().eth.account.from_key(pk).address
-        except Exception:
-            pass
+                print(f"✓ Indirizzo derivato da PRIVATE_KEY: {poly_safe[:10]}...{poly_safe[-8:]}", flush=True)
+        except Exception as e:
+            print(f"⚠️  Errore derivazione indirizzo: {e}", flush=True)
     if not poly_safe:
-        print("ERRORE: imposta POLY_SAFE_ADDRESS in .env", file=sys.stderr)
+        print("❌ ERRORE: imposta POLY_SAFE_ADDRESS in .env", file=sys.stderr, flush=True)
         sys.exit(1)
+    else:
+        print(f"✓ Indirizzo wallet: {poly_safe[:10]}...{poly_safe[-8:]}", flush=True)
 
     proxy_url = _get_proxy_url() or None
     try_relayer = os.getenv("CLAIM_USE_RELAYER", "1").strip().lower() in ("1", "true", "yes")
     # CLOB SELL non funziona per posizioni redeemable (mercato risolto = orderbook chiuso)
     try_clob_sell = os.getenv("CLAIM_USE_CLOB_SELL", "0").strip().lower() in ("1", "true", "yes")
 
-    print("--- CLAIMBOT loop (controlla → claim → aspetta {} min) ---".format(LOOP_WAIT_SECONDS // 60))
-    print("  Relayer:", "sì" if try_relayer else "no")
+    print("=" * 60, flush=True)
+    print("--- CLAIMBOT loop (controlla → claim → aspetta {} min) ---".format(LOOP_WAIT_SECONDS // 60), flush=True)
+    print(f"  Data/Ora avvio: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", flush=True)
+    print(f"  Relayer: {'sì' if try_relayer else 'no'}", flush=True)
+    print(f"  CLOB SELL: {'sì' if try_clob_sell else 'no'}", flush=True)
+    print(f"  Account: {poly_safe[:10]}...{poly_safe[-8:]}", flush=True)
+    print("=" * 60, flush=True)
     print()
 
+    cycle_count = 0
     while True:
+        cycle_count += 1
         try:
+            print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] === CICLO #{cycle_count} ===", flush=True)
             wait_seconds = run_one_cycle(ex, poly_safe, proxy_url, try_relayer, try_clob_sell, signature_type)
             if wait_seconds <= 0:
                 wait_seconds = LOOP_WAIT_SECONDS
         except KeyboardInterrupt:
-            print("\nInterrotto.")
+            print("\nInterrotto.", flush=True)
             break
         except Exception as e:
-            print(f"  Errore ciclo: {e}")
+            import traceback
+            print(f"  ❌ Errore ciclo: {e}", flush=True)
+            print(f"  Traceback: {traceback.format_exc()}", flush=True)
             wait_seconds = LOOP_WAIT_SECONDS
         if RUN_ONCE:
-            print("  RUN_ONCE=1: un solo ciclo, exit.")
+            print("  RUN_ONCE=1: un solo ciclo, exit.", flush=True)
             break
         wait_mins = wait_seconds // 60
         if wait_mins >= 60:
             wait_hours = wait_mins // 60
             wait_mins_remainder = wait_mins % 60
-            print(f"  Prossimo controllo tra {wait_hours}h {wait_mins_remainder}m...")
+            print(f"  ⏳ Prossimo controllo tra {wait_hours}h {wait_mins_remainder}m...", flush=True)
         else:
-            print(f"  Prossimo controllo tra {wait_mins} minuti...")
+            print(f"  ⏳ Prossimo controllo tra {wait_mins} minuti...", flush=True)
+        print("-" * 60, flush=True)
         time.sleep(wait_seconds)
 
 
