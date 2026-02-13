@@ -116,18 +116,39 @@ Clicca **Create Background Worker**. Render farà build (Docker) e avvierà il w
 
 ---
 
-## 5. Riepilogo comandi (copia-incolla)
+## 5. Riepilogo: cosa è già stato fatto da terminale
+
+- `git init` — fatto  
+- `git add .` + `git commit -m "..."` — fatto  
+- **.env** non è nel repo (ignorato da .gitignore)
+
+## 6. Cosa devi fare tu
+
+### A. Crea il repository su GitHub
+
+1. Vai su **https://github.com/new**
+2. **Repository name**: es. `claimbot`
+3. **Public** (o Private se preferisci)
+4. **Non** aggiungere README, .gitignore o license (li hai già)
+5. Clicca **Create repository**
+
+### B. Collega e pusha (sostituisci con il tuo username e nome repo)
 
 ```bash
 cd /Users/matteogianino/Desktop/CLAIMBOT
-git init
-git add .
-git status
-git commit -m "CLAIMBOT: loop claim Polymarket + Relayer PROXY (Node)"
-# Poi su GitHub: crea repo, poi:
-git remote add origin https://github.com/TUO_USERNAME/NOME_REPO.git
+git remote add origin https://github.com/TUO_USERNAME/claimbot.git
 git branch -M main
 git push -u origin main
 ```
 
-Dopo il push: su Render → New → Background Worker → connetti il repo → Runtime: Docker → imposta le env → Create.
+Se chiede login: usa il **Personal Access Token** (Settings → Developer settings → Personal access tokens) al posto della password.
+
+### C. Su Render
+
+1. **dashboard.render.com** → **New +** → **Background Worker**
+2. Connetti il repo GitHub (es. `TUO_USERNAME/claimbot`)
+3. **Runtime**: **Docker**
+4. **Environment**: aggiungi tutte le variabili del tuo `.env` (PRIVATE_KEY, POLY_SAFE_ADDRESS, BUILDER_*, POLYMARKET_*, ecc.)
+5. **Create Background Worker**
+
+Il worker partirà e nei **Logs** vedrai il loop di `check_cash.py`.
