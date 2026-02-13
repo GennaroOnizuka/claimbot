@@ -19,12 +19,19 @@ load_dotenv()
 sys.stdout.reconfigure(line_buffering=True) if hasattr(sys.stdout, 'reconfigure') else None
 sys.stderr.reconfigure(line_buffering=True) if hasattr(sys.stderr, 'reconfigure') else None
 
-# Secondi tra un giro e l'altro (default 10 minuti)
-LOOP_WAIT_SECONDS = int(os.getenv("CLAIM_LOOP_WAIT_SECONDS", "600"))
+# Rate limit Relayer: quota giornaliera (es. 100 richieste/24h). Per non sforare:
+# intervallo = 24h / max_richieste → es. 86400/100 = 864 s ≈ 14.4 min. Usiamo 15 min per sicurezza.
+RELAYER_MAX_REQUESTS_PER_DAY = int(os.getenv("RELAYER_MAX_REQUESTS_PER_DAY", "100"))
+SECONDS_PER_DAY = 24 * 3600
+# Secondi tra un ciclo e l'altro: se non impostato, calcolato da quota (100/24h → ~15 min)
+_default_wait = max(600, (SECONDS_PER_DAY + RELAYER_MAX_REQUESTS_PER_DAY - 1) // RELAYER_MAX_REQUESTS_PER_DAY)
+LOOP_WAIT_SECONDS = int(os.getenv("CLAIM_LOOP_WAIT_SECONDS", str(_default_wait)))
 # Se 1/true: esegue un solo ciclo e esce (per test)
 RUN_ONCE = os.getenv("RUN_ONCE", "").strip().lower() in ("1", "true", "yes")
-# Flag globale per tracciare se c'è rate limit attivo (per ridurre claim per ciclo)
+# Flag globale per tracciare se c'è rate limit attivo
 _rate_limit_active = False
+# Timestamp (epoch) quando la quota Relayer si resetta (impostato quando riceviamo 429)
+_rate_limit_reset_at = None
 
 
 def _get_proxy_url() -> str:
@@ -60,6 +67,7 @@ def run_one_cycle(ex, poly_safe: str, proxy_url: str, try_relayer: bool, try_clo
     """Un singolo ciclo: balance, fetch claim, esegui claim (relayer o CLOB).
     Returns: seconds to wait before next cycle (0 = use default LOOP_WAIT_SECONDS).
     """
+    print(f"  [cycle] Balance e claim...", flush=True)
     from claims import (
         fetch_redeemable_positions,
         get_unique_condition_ids,
@@ -146,20 +154,20 @@ def run_one_cycle(ex, poly_safe: str, proxy_url: str, try_relayer: bool, try_clo
                                     except:
                                         pass
                             if reset_match and reset_match > 0:
+                                global _rate_limit_reset_at
+                                _rate_limit_reset_at = time.time() + reset_match
                                 reset_hours = reset_match // 3600
                                 reset_mins = (reset_match % 3600) // 60
                                 print(f"  ⚠️  Rate limit Relayer: quota esaurita. Reset tra ~{reset_hours}h {reset_mins}m", flush=True)
-                                print(f"  ℹ️  Continuerò a provare ogni 10 minuti (1 claim per ciclo)", flush=True)
-                                # Attiva flag rate limit per ridurre claim nei prossimi cicli
+                                print(f"  ℹ️  Prossimo tentativo tra 10 minuti (nessuna attesa lunga).", flush=True)
                                 global _rate_limit_active
                                 _rate_limit_active = True
-                                # NON aumentare wait: continua ogni 10 minuti anche con rate limit
-                                return 0  # Usa wait normale (10 minuti)
+                                return 0  # Sempre 10 minuti, mai 3h
                             else:
-                                print(f"  ⚠️  Rate limit Relayer: quota esaurita. Continuerò a provare ogni 10 minuti.", flush=True)
+                                print(f"  ⚠️  Rate limit Relayer. Prossimo tentativo tra 10 minuti.", flush=True)
                                 global _rate_limit_active
                                 _rate_limit_active = True
-                                return 0  # Usa wait normale (10 minuti)
+                                return 0  # Sempre 10 minuti
                         else:
                             # Errore diverso dal rate limit: mostra TUTTI i dettagli
                             print(f"  ⚠️  Errore claim Node (codice {r.returncode}):")
@@ -282,8 +290,11 @@ def main():
     # CLOB SELL non funziona per posizioni redeemable (mercato risolto = orderbook chiuso)
     try_clob_sell = os.getenv("CLAIM_USE_CLOB_SELL", "0").strip().lower() in ("1", "true", "yes")
 
+    wait_min = LOOP_WAIT_SECONDS // 60
     print("=" * 60, flush=True)
-    print("--- CLAIMBOT loop (controlla → claim → aspetta {} min) ---".format(LOOP_WAIT_SECONDS // 60), flush=True)
+    print("--- CLAIMBOT loop (controlla → claim → aspetta {} min) ---".format(wait_min), flush=True)
+    print(f"  Rate limit: max {RELAYER_MAX_REQUESTS_PER_DAY} richieste/24h → 1 ciclo ogni {wait_min} min (per non sforare quota)", flush=True)
+    print(f"  (All'inizio di ogni ciclo: se in attesa di reset quota, vedrai «quanto manca al nuovo rate limit»)", flush=True)
     print(f"  Data/Ora avvio: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", flush=True)
     print(f"  Relayer: {'sì' if try_relayer else 'no'}", flush=True)
     print(f"  CLOB SELL: {'sì' if try_clob_sell else 'no'}", flush=True)
@@ -296,6 +307,17 @@ def main():
         cycle_count += 1
         try:
             print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] === CICLO #{cycle_count} ===", flush=True)
+            # Mostra quanto manca al reset del rate limit (se abbiamo ricevuto un 429 in precedenza)
+            global _rate_limit_reset_at
+            if _rate_limit_reset_at is not None:
+                remaining = _rate_limit_reset_at - time.time()
+                if remaining > 0:
+                    h, r = divmod(int(remaining), 3600)
+                    m = r // 60
+                    print(f"  ⏱️  Rate limit: nuovo reset tra {h}h {m}m", flush=True)
+                else:
+                    _rate_limit_reset_at = None
+                    print(f"  ⏱️  Rate limit: quota dovrebbe essere resettata ora.", flush=True)
             wait_seconds = run_one_cycle(ex, poly_safe, proxy_url, try_relayer, try_clob_sell, signature_type)
             if wait_seconds <= 0:
                 wait_seconds = LOOP_WAIT_SECONDS
@@ -311,13 +333,16 @@ def main():
             print("  RUN_ONCE=1: un solo ciclo, exit.", flush=True)
             break
         wait_mins = wait_seconds // 60
+        # Log sempre visibile: cosa aspettiamo e per quanto
         if wait_mins >= 60:
             wait_hours = wait_mins // 60
             wait_mins_remainder = wait_mins % 60
-            print(f"  ⏳ Prossimo controllo tra {wait_hours}h {wait_mins_remainder}m...", flush=True)
+            print(f"  ⏳ Prossimo controllo tra {wait_hours}h {wait_mins_remainder}m ({wait_seconds}s)", flush=True)
         else:
-            print(f"  ⏳ Prossimo controllo tra {wait_mins} minuti...", flush=True)
+            print(f"  ⏳ Prossimo controllo tra {wait_mins} minuti ({wait_seconds}s)", flush=True)
         print("-" * 60, flush=True)
+        sys.stdout.flush()
+        sys.stderr.flush()
         time.sleep(wait_seconds)
 
 

@@ -21,5 +21,7 @@ RUN cd claim-proxy && npm install --omit=dev
 COPY check_cash.py claims.py executor.py .
 COPY claim-proxy/claim-proxy.mjs claim-proxy/
 
+# Output non bufferizzato: log visibili subito su Render
+ENV PYTHONUNBUFFERED=1
 # .env va impostato su Render (Environment) o montato a runtime
-CMD ["python3", "check_cash.py"]
+CMD ["python3", "-u", "check_cash.py"]
