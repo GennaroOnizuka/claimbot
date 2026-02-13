@@ -91,21 +91,45 @@ async function main() {
         console.log("Claim OK:", cid.slice(0, 18) + "...", "tx:", result.transactionHash);
         ok++;
       } else {
-        console.error("Claim fallito:", cid.slice(0, 18) + "...");
+        console.log("Claim fallito:", cid.slice(0, 18) + "...");
       }
     } catch (e) {
-      const errMsg = e.message || String(e);
+      // Estrai messaggio errore completo
+      let errMsg = e.message || String(e);
+      let errData = "";
+      if (e.data) {
+        try {
+          errData = typeof e.data === "string" ? e.data : JSON.stringify(e.data);
+        } catch {}
+      }
+      if (e.response?.data) {
+        try {
+          errData = typeof e.response.data === "string" ? e.response.data : JSON.stringify(e.response.data);
+        } catch {}
+      }
+      // Cattura anche error object completo
+      let errObj = "";
+      try {
+        errObj = JSON.stringify(e, Object.getOwnPropertyNames(e)).substring(0, 300);
+      } catch {}
+      
+      const fullErr = errMsg + (errData ? " | data: " + errData : "") + (errObj ? " | obj: " + errObj : "");
+      
       // Rate limit 429: quota exceeded
-      if (errMsg.includes("429") || errMsg.includes("quota exceeded") || errMsg.includes("Too Many Requests")) {
+      if (fullErr.includes("429") || fullErr.includes("quota exceeded") || fullErr.includes("Too Many Requests")) {
         rateLimitHit = true;
-        const resetMatch = errMsg.match(/resets in (\d+) seconds/);
+        const resetMatch = fullErr.match(/resets in (\d+) seconds/);
         if (resetMatch) {
           rateLimitResetSeconds = parseInt(resetMatch[1], 10);
         }
-        console.error("RATE_LIMIT_429:", rateLimitResetSeconds || "unknown");
+        console.log("RATE_LIMIT_429:", rateLimitResetSeconds || "unknown");
         break; // Non provare altri claim se quota esaurita
       }
-      console.error("Claim errore", cid.slice(0, 18) + "...", errMsg);
+      
+      // Mostra errore completo su stdout (così Python lo vede sempre)
+      console.log("Claim errore", cid.slice(0, 18) + "...", fullErr.substring(0, 500));
+      // Anche su stderr per sicurezza
+      console.error("Claim errore", cid.slice(0, 18) + "...", fullErr.substring(0, 500));
     }
   }
   if (rateLimitHit) {

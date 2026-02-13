@@ -114,6 +114,8 @@ def run_one_cycle(ex, poly_safe: str, proxy_url: str, try_relayer: bool, try_clo
                         text=True,
                         timeout=120,
                     )
+                    # Mostra sempre stdout e stderr per debug
+                    output = (r.stdout or "") + "\n" + (r.stderr or "")
                     if r.returncode == 0:
                         claimed_relayer = len(condition_ids)
                         if r.stdout:
@@ -122,7 +124,6 @@ def run_one_cycle(ex, poly_safe: str, proxy_url: str, try_relayer: bool, try_clo
                                     print(f"  {line}")
                     else:
                         # Controlla se è rate limit 429
-                        output = (r.stderr or "") + (r.stdout or "")
                         if "429" in output or "quota exceeded" in output.lower() or "RATE_LIMIT_429" in output:
                             reset_match = None
                             for line in output.split("\n"):
@@ -143,8 +144,15 @@ def run_one_cycle(ex, poly_safe: str, proxy_url: str, try_relayer: bool, try_clo
                                 print(f"  ⚠️  Rate limit Relayer: quota esaurita. Aspetta ~8 ore prima di riprovare.")
                                 return 3600 * 2  # Aspetta 2 ore se non sappiamo il reset time
                         else:
-                            if r.stderr:
-                                print(f"  Node PROXY: {r.stderr.strip()[:200]}")
+                            # Errore diverso dal rate limit: mostra TUTTI i dettagli
+                            print(f"  ⚠️  Errore claim Node (codice {r.returncode}):")
+                            # Mostra tutto stdout e stderr
+                            all_output = (r.stdout or "") + "\n" + (r.stderr or "")
+                            for line in all_output.strip().split("\n"):
+                                if line.strip():
+                                    # Filtra solo righe informative (non stack trace completo se troppo lungo)
+                                    if len(line) < 300 or "Claim errore" in line or "RATE_LIMIT" in line or "error" in line.lower():
+                                        print(f"    {line[:200]}")
                             # Non fare fallback Python per Magic (modulo non installato su Replit/Render)
                 except FileNotFoundError:
                     print("  Node non trovato. Installa Node.js e in claim-proxy/ esegui: npm install")
