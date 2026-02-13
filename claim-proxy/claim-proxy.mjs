@@ -79,64 +79,59 @@ async function main() {
     return { to: CTF_ADDRESS, data, value: "0" };
   }
 
-  let ok = 0;
-  let rateLimitHit = false;
-  let rateLimitResetSeconds = 0;
-  for (const cid of conditionIds) {
-    try {
-      const tx = createRedeemTx(cid);
-      const response = await client.execute([tx], "redeem positions");
-      const result = await response.wait();
-      if (result?.transactionHash) {
-        console.log("Claim OK:", cid.slice(0, 18) + "...", "tx:", result.transactionHash);
-        ok++;
-      } else {
-        console.log("Claim fallito:", cid.slice(0, 18) + "...");
-      }
-    } catch (e) {
-      // Estrai messaggio errore completo
-      let errMsg = e.message || String(e);
-      let errData = "";
-      if (e.data) {
-        try {
-          errData = typeof e.data === "string" ? e.data : JSON.stringify(e.data);
-        } catch {}
-      }
-      if (e.response?.data) {
-        try {
-          errData = typeof e.response.data === "string" ? e.response.data : JSON.stringify(e.response.data);
-        } catch {}
-      }
-      // Cattura anche error object completo
-      let errObj = "";
-      try {
-        errObj = JSON.stringify(e, Object.getOwnPropertyNames(e)).substring(0, 300);
-      } catch {}
-      
-      const fullErr = errMsg + (errData ? " | data: " + errData : "") + (errObj ? " | obj: " + errObj : "");
-      
-      // Rate limit 429: quota exceeded
-      if (fullErr.includes("429") || fullErr.includes("quota exceeded") || fullErr.includes("Too Many Requests")) {
-        rateLimitHit = true;
-        const resetMatch = fullErr.match(/resets in (\d+) seconds/);
-        if (resetMatch) {
-          rateLimitResetSeconds = parseInt(resetMatch[1], 10);
-        }
-        console.log("RATE_LIMIT_429:", rateLimitResetSeconds || "unknown");
-        break; // Non provare altri claim se quota esaurita
-      }
-      
-      // Mostra errore completo su stdout (così Python lo vede sempre)
-      console.log("Claim errore", cid.slice(0, 18) + "...", fullErr.substring(0, 500));
-      // Anche su stderr per sicurezza
-      console.error("Claim errore", cid.slice(0, 18) + "...", fullErr.substring(0, 500));
+  // Crea TUTTE le transazioni per batch execution (una sola chiamata al relayer)
+  const allTxs = conditionIds.map(cid => createRedeemTx(cid));
+  console.log(`Batch: ${allTxs.length} claim in un'unica transazione`);
+  
+  try {
+    // Esegui TUTTE le transazioni in un'unico batch (una sola chiamata al relayer)
+    const response = await client.execute(allTxs, `Redeem ${allTxs.length} positions`);
+    const result = await response.wait();
+    
+    if (result?.transactionHash) {
+      console.log(`✓ Batch claim OK: ${allTxs.length} mercati, tx: ${result.transactionHash}`);
+      console.log("Fatto:", allTxs.length, "/", conditionIds.length);
+      process.exit(0);
+    } else {
+      console.error("Batch claim fallito: nessun transactionHash");
+      process.exit(1);
     }
+  } catch (e) {
+    // Estrai messaggio errore completo
+    let errMsg = e.message || String(e);
+    let errData = "";
+    if (e.data) {
+      try {
+        errData = typeof e.data === "string" ? e.data : JSON.stringify(e.data);
+      } catch {}
+    }
+    if (e.response?.data) {
+      try {
+        errData = typeof e.response.data === "string" ? e.response.data : JSON.stringify(e.response.data);
+      } catch {}
+    }
+    // Cattura anche error object completo
+    let errObj = "";
+    try {
+      errObj = JSON.stringify(e, Object.getOwnPropertyNames(e)).substring(0, 300);
+    } catch {}
+    
+    const fullErr = errMsg + (errData ? " | data: " + errData : "") + (errObj ? " | obj: " + errObj : "");
+    
+    // Rate limit 429: quota exceeded
+    if (fullErr.includes("429") || fullErr.includes("quota exceeded") || fullErr.includes("Too Many Requests")) {
+      const resetMatch = fullErr.match(/resets in (\d+) seconds/);
+      const resetSeconds = resetMatch ? parseInt(resetMatch[1], 10) : 0;
+      console.log("RATE_LIMIT_429:", resetSeconds || "unknown");
+      console.log("RATE_LIMIT_RESET_SECONDS:", resetSeconds);
+      process.exit(1);
+    }
+    
+    // Mostra errore completo
+    console.log("Batch claim errore:", fullErr.substring(0, 500));
+    console.error("Batch claim errore:", fullErr.substring(0, 500));
+    process.exit(1);
   }
-  if (rateLimitHit) {
-    console.log("RATE_LIMIT_RESET_SECONDS:", rateLimitResetSeconds);
-  }
-  console.log("Fatto:", ok, "/", conditionIds.length);
-  process.exit(ok === conditionIds.length ? 0 : 1);
 }
 
 main();

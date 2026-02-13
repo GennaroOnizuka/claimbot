@@ -23,6 +23,8 @@ sys.stderr.reconfigure(line_buffering=True) if hasattr(sys.stderr, 'reconfigure'
 LOOP_WAIT_SECONDS = int(os.getenv("CLAIM_LOOP_WAIT_SECONDS", "600"))
 # Se 1/true: esegue un solo ciclo e esce (per test)
 RUN_ONCE = os.getenv("RUN_ONCE", "").strip().lower() in ("1", "true", "yes")
+# Flag globale per tracciare se c'è rate limit attivo (per ridurre claim per ciclo)
+_rate_limit_active = False
 
 
 def _get_proxy_url() -> str:
@@ -84,11 +86,9 @@ def run_one_cycle(ex, poly_safe: str, proxy_url: str, try_relayer: bool, try_clo
     if len(positions) > 15:
         print(f"    ... e altre {len(positions) - 15}")
     
-    # Limita claim per ciclo per evitare rate limit (max 10 per ciclo)
-    MAX_CLAIMS_PER_CYCLE = int(os.getenv("MAX_CLAIMS_PER_CYCLE", "10"))
-    if len(condition_ids) > MAX_CLAIMS_PER_CYCLE:
-        print(f"  ⚠️  Limite claim per ciclo: {MAX_CLAIMS_PER_CYCLE} (ci sono {len(condition_ids)} mercati)")
-        condition_ids = condition_ids[:MAX_CLAIMS_PER_CYCLE]
+    # Batch execution: tutte le transazioni in un'unica chiamata al relayer
+    # Non serve più limitare perché facciamo 1 chiamata invece di N
+    # Il relayer supporta batch fino a molte transazioni insieme
 
     # 1) Tenta claim via Relayer (richiede Builder API + Safe wallet)
     claimed_relayer = 0
@@ -123,7 +123,13 @@ def run_one_cycle(ex, poly_safe: str, proxy_url: str, try_relayer: bool, try_clo
                     # Mostra sempre stdout e stderr per debug
                     output = (r.stdout or "") + "\n" + (r.stderr or "")
                     if r.returncode == 0:
+                        # Batch execution: un'unica transazione per tutti i claim
                         claimed_relayer = len(condition_ids)
+                        # Se il batch è riuscito, resetta il flag rate limit
+                        global _rate_limit_active
+                        if claimed_relayer > 0:
+                            _rate_limit_active = False
+                            print(f"  ✓ Batch claim riusciti: {claimed_relayer} mercati", flush=True)
                         if r.stdout:
                             for line in r.stdout.strip().split("\n"):
                                 if line.strip():
@@ -142,13 +148,18 @@ def run_one_cycle(ex, poly_safe: str, proxy_url: str, try_relayer: bool, try_clo
                             if reset_match and reset_match > 0:
                                 reset_hours = reset_match // 3600
                                 reset_mins = (reset_match % 3600) // 60
-                                print(f"  ⚠️  Rate limit Relayer: quota esaurita. Reset tra ~{reset_hours}h {reset_mins}m")
-                                # Ritorna un wait esteso (minimo 1 ora, max reset time)
-                                extended_wait = min(max(3600, reset_match // 2), reset_match)
-                                return extended_wait
+                                print(f"  ⚠️  Rate limit Relayer: quota esaurita. Reset tra ~{reset_hours}h {reset_mins}m", flush=True)
+                                print(f"  ℹ️  Continuerò a provare ogni 10 minuti (1 claim per ciclo)", flush=True)
+                                # Attiva flag rate limit per ridurre claim nei prossimi cicli
+                                global _rate_limit_active
+                                _rate_limit_active = True
+                                # NON aumentare wait: continua ogni 10 minuti anche con rate limit
+                                return 0  # Usa wait normale (10 minuti)
                             else:
-                                print(f"  ⚠️  Rate limit Relayer: quota esaurita. Aspetta ~8 ore prima di riprovare.")
-                                return 3600 * 2  # Aspetta 2 ore se non sappiamo il reset time
+                                print(f"  ⚠️  Rate limit Relayer: quota esaurita. Continuerò a provare ogni 10 minuti.", flush=True)
+                                global _rate_limit_active
+                                _rate_limit_active = True
+                                return 0  # Usa wait normale (10 minuti)
                         else:
                             # Errore diverso dal rate limit: mostra TUTTI i dettagli
                             print(f"  ⚠️  Errore claim Node (codice {r.returncode}):")
@@ -169,22 +180,24 @@ def run_one_cycle(ex, poly_safe: str, proxy_url: str, try_relayer: bool, try_clo
             else:
                 print("  Script claim-proxy/claim-proxy.mjs non trovato. Per account Magic: cd claim-proxy && npm install")
         else:
-            # Safe wallet: usa Relayer Python
-            print("  Tentativo claim via Relayer...")
+            # Safe wallet: usa Relayer Python (batch execution)
+            print("  Tentativo batch claim via Relayer (Python)...")
             txs = [build_redeem_tx(cid) for cid in condition_ids]
             results = execute_redeem_via_relayer(txs, pk, builder_key, builder_secret, builder_pp)
-            errors = [r.get("error") for r in results if isinstance(r, dict) and r.get("error")]
-            for r in results:
-                if isinstance(r, dict) and not r.get("error"):
-                    claimed_relayer += 1
-                    print(f"  Claim (relayer): inviato")
-            if errors:
-                msg = errors[0][:90]
-                if len(errors) > 1 and all(e[:50] == errors[0][:50] for e in errors):
-                    print(f"  Relayer: {msg} ({len(errors)} mercati)")
-                else:
-                    for e in errors:
-                        print(f"  Relayer: {e[:90]}")
+            # Batch execution: un unico risultato per tutte le transazioni
+            if results and len(results) > 0:
+                result = results[0]
+                if result.get("error"):
+                    print(f"  Relayer: {result['error'][:150]}", flush=True)
+                elif result.get("transactionHash"):
+                    count = result.get("count", len(condition_ids))
+                    claimed_relayer = count
+                    print(f"  ✓ Batch claim (relayer): {count} mercati, tx: {result['transactionHash']}", flush=True)
+                    # Resetta flag rate limit se riuscito
+                    global _rate_limit_active
+                    _rate_limit_active = False
+            else:
+                print("  Relayer: nessun risultato", flush=True)
     elif try_relayer and not (builder_key and builder_secret and builder_pp):
         print("  Claim non eseguiti: mancano BUILDER_API_KEY, BUILDER_SECRET, BUILDER_PASSPHRASE in .env")
 

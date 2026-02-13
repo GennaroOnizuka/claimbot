@@ -128,25 +128,35 @@ def execute_redeem_via_relayer(
         return [{"error": f"BuilderConfig: {e}"}]
 
     client = RelayClient(relayer_url, chain_id, pk, builder_config)
-    results = []
-    for tx in transactions:
-        try:
-            safe_tx = SafeTransaction(
+    
+    # Batch execution: tutte le transazioni in un'unica chiamata al relayer
+    # Questo riduce drasticamente le chiamate API e evita rate limit
+    try:
+        safe_txs = [
+            SafeTransaction(
                 to=tx["to"],
                 operation=OperationType.Call,
                 data=tx["data"],
                 value=tx.get("value", "0"),
             )
-            response = client.execute([safe_tx], "Redeem positions")
-            if response:
-                results.append({"transactionID": getattr(response, "transaction_id", None), "transactionHash": getattr(response, "transaction_hash", None)})
-        except Exception as e:
-            err = str(e).strip()
-            if "not deployed" in err.lower() or "expected safe" in err.lower():
-                results.append({"error": "Relayer supporta solo Safe wallet. Con account Magic fai claim su polymarket.com → Portfolio."})
-            else:
-                results.append({"error": err})
-    return results
+            for tx in transactions
+        ]
+        # Esegui TUTTE le transazioni in un unico batch
+        response = client.execute(safe_txs, f"Redeem {len(safe_txs)} positions")
+        if response:
+            return [{
+                "transactionID": getattr(response, "transaction_id", None),
+                "transactionHash": getattr(response, "transaction_hash", None),
+                "count": len(safe_txs)
+            }]
+        else:
+            return [{"error": "Nessuna risposta dal relayer"}]
+    except Exception as e:
+        err = str(e).strip()
+        if "not deployed" in err.lower() or "expected safe" in err.lower():
+            return [{"error": "Relayer supporta solo Safe wallet. Con account Magic fai claim su polymarket.com → Portfolio."}]
+        else:
+            return [{"error": err}]
 
 
 def get_unique_condition_ids(positions: List[Dict[str, Any]]) -> List[str]:
